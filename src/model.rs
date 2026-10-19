@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use ort::session::Session;
 use ort::value::Tensor;
 
+use crate::bpe;
 use crate::manifest::{self, Manifest, Pooling, Role};
-use crate::{bpe, wordpiece};
 
 /// 一份载入了的模型。
 #[derive(Debug)]
@@ -20,22 +20,8 @@ pub struct Embedder {
     manifest: Manifest,
 }
 
-/// 照清单的分词（R-5 六补）。
-#[derive(Debug)]
-enum Tokenizer {
-    Wordpiece(wordpiece::Tokenizer),
-    /// 装箱：比 WordPiece 那一份大得多（正则、两张表）。
-    Bpe(Box<bpe::Tokenizer>),
-}
-
-impl Tokenizer {
-    fn encode(&self, text: &str, limit: usize) -> Vec<i64> {
-        match self {
-            Tokenizer::Wordpiece(tokenizer) => tokenizer.encode(text, limit),
-            Tokenizer::Bpe(tokenizer) => tokenizer.encode(text, limit),
-        }
-    }
-}
+/// 照清单的分词：只有字节级 BPE（WordPiece 2026-10-19 随 bge 拿掉）。装箱：正则、两张表，挺大。
+type Tokenizer = Box<bpe::Tokenizer>;
 
 /// 模型的一个输入：认这三种。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +56,8 @@ pub enum LoadError {
         /// 为什么。
         error: String,
     },
+    /// 清单写的分词这里不支持（WordPiece，或者没写分词的旧清单）。
+    Unsupported(String),
     /// ONNX Runtime 载入不了模型。
     Model {
         /// 哪个文件。
@@ -85,6 +73,12 @@ impl fmt::Display for LoadError {
             LoadError::Missing(path) => write!(f, "cannot find {}", path.display()),
             LoadError::Vocab { path, error } => {
                 write!(f, "cannot read {}: {error}", path.display())
+            }
+            LoadError::Unsupported(kind) => {
+                write!(
+                    f,
+                    "the {kind} tokenizer is not supported; only byte-level BPE is"
+                )
             }
             LoadError::Model { path, error } => {
                 write!(f, "cannot load {}: {error}", path.display())
@@ -138,20 +132,19 @@ impl Embedder {
         let model = dir.join(&manifest.file(Role::Model).name);
         let vocab = dir.join(&manifest.file(Role::Vocab).name);
         let merges = match manifest.tokenizer {
-            manifest::Tokenizer::Wordpiece => None,
-            manifest::Tokenizer::Bpe { .. } => Some(dir.join(&manifest.file(Role::Merges).name)),
+            manifest::Tokenizer::Wordpiece => {
+                return Err(LoadError::Unsupported("WordPiece".to_string()));
+            }
+            manifest::Tokenizer::Bpe { .. } => dir.join(&manifest.file(Role::Merges).name),
         };
-        for path in [Some(&model), Some(&vocab), merges.as_ref()]
-            .into_iter()
-            .flatten()
-        {
+        for path in [&model, &vocab, &merges] {
             if !path.is_file() {
                 return Err(LoadError::Missing(path.clone()));
             }
         }
         // 切词表（granite 那份六十来万条，约 150 毫秒）和 ONNX Runtime 建会话（约 170 毫秒）各不相干，一起做；算向量照旧单线程。
         let (tokenizer, session) = std::thread::scope(|scope| {
-            let tokenizer = scope.spawn(|| tokenizer(&manifest, &vocab, merges.as_deref()));
+            let tokenizer = scope.spawn(|| tokenizer(&manifest, &vocab, &merges));
             let session = session(&model);
             let tokenizer = tokenizer
                 .join()
@@ -214,29 +207,20 @@ impl Embedder {
     }
 }
 
-/// 照清单的分词读词表（BPE 的另读合并）。
-fn tokenizer(
-    manifest: &Manifest,
-    vocab: &Path,
-    merges: Option<&Path>,
-) -> Result<Tokenizer, LoadError> {
+/// 照清单读词表、合并（只有字节级 BPE，`load` 先挡掉了别的）。
+fn tokenizer(manifest: &Manifest, vocab: &Path, merges: &Path) -> Result<Tokenizer, LoadError> {
     let bad = |path: &Path, error: String| LoadError::Vocab {
         path: path.to_path_buf(),
         error,
     };
+    let manifest::Tokenizer::Bpe { start, end } = &manifest.tokenizer else {
+        return Err(LoadError::Unsupported("WordPiece".to_string()));
+    };
     let text = std::fs::read_to_string(vocab).map_err(|error| bad(vocab, error.to_string()))?;
-    match (&manifest.tokenizer, merges) {
-        (manifest::Tokenizer::Bpe { start, end }, Some(merges)) => {
-            let pairs =
-                std::fs::read_to_string(merges).map_err(|error| bad(merges, error.to_string()))?;
-            bpe::Tokenizer::new(&text, &pairs, start, end)
-                .map(|tokenizer| Tokenizer::Bpe(Box::new(tokenizer)))
-                .map_err(|error| bad(vocab, error.to_string()))
-        }
-        _ => wordpiece::Tokenizer::new(&text)
-            .map(Tokenizer::Wordpiece)
-            .map_err(|error| bad(vocab, error.to_string())),
-    }
+    let pairs = std::fs::read_to_string(merges).map_err(|error| bad(merges, error.to_string()))?;
+    bpe::Tokenizer::new(&text, &pairs, start, end)
+        .map(Box::new)
+        .map_err(|error| bad(vocab, error.to_string()))
 }
 
 /// ONNX Runtime 载入模型（一次一条、单线程），连同它声明的几个输入：只认三种，要别的、没有 `input_ids` 的载入不了。

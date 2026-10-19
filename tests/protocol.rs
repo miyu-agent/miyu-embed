@@ -1,6 +1,7 @@
-//! 小程序的协议（`recall.md` 第四条第 4 款），手造的小模型（`fixtures/tiny/`）：起来先说 `ready`；一行一句，回一行向量，
-//! 和 Python 的 ONNX Runtime 算的逐个比；坏的一行回错、接着读；超长的截断；标准输入关了退出码 0；清单、文件不对的说一行
-//! 错、退出码 1；参数写错退出码 2。字节级 BPE、只有两个输入的小模型（`fixtures/tiny-bpe/`，施工 R-5 六补）另走一遍。
+//! 小程序的协议（`recall.md` 第四条第 4 款），字节级 BPE、只有两个输入的手造小模型（`fixtures/tiny-bpe/`，施工 R-5 六补）：
+//! 起来先说 `ready`；一行一句，回一行向量，和 Python 的 ONNX Runtime 算的逐个比，超长的照 `max_tokens` 截；坏的一行回错、
+//! 接着读；标准输入关了退出码 0；清单、文件不对的说一行错、退出码 1；清单写 WordPiece（或者没写分词）的明说不支持、退出码
+//! 1（WordPiece 2026-10-19 随 bge 拿掉了）；参数写错退出码 2。
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -11,10 +12,10 @@ use serde_json::{Value, json};
 
 use crate::support::{fixtures, read};
 
-/// 小模型对一组编号的输出（`fixtures/tiny/expected.json`）。
+/// 小模型对几句的向量（`fixtures/tiny-bpe/expected.json`）：最后一句超长，截到清单的 `max_tokens`。
 #[derive(Deserialize)]
 struct Expected {
-    ids: Vec<i64>,
+    text: String,
     vector: Vec<f32>,
 }
 
@@ -46,7 +47,7 @@ impl Embed {
 
     /// 照小模型的清单起一个。
     fn tiny() -> Embed {
-        let dir = fixtures().join("tiny");
+        let dir = fixtures().join("tiny-bpe");
         Embed::spawn(&[
             "--manifest".as_ref(),
             dir.join("manifest.toml").as_os_str(),
@@ -100,7 +101,7 @@ fn same(got: &[f32], want: &[f32]) -> bool {
 }
 
 fn expected() -> Vec<Expected> {
-    serde_json::from_str(&read("tiny/expected.json")).expect("合写法")
+    serde_json::from_str(&read("tiny-bpe/expected.json")).expect("合写法")
 }
 
 #[test]
@@ -108,41 +109,22 @@ fn it_says_ready_then_answers_each_line() {
     let mut embed = Embed::tiny();
     assert_eq!(
         embed.line(),
-        json!({"ready": {"model": "local:tiny", "dims": 4}})
+        json!({"ready": {"model": "local:tiny-bpe", "dims": 4}})
     );
-    let expected = expected();
-    // 小词表上这几句切成的编号正是 expected.json 里的前四组：我的猫、喝茶、hello world!、不认识的字。
-    for (k, text) in ["我的猫", "喝茶", "hello world!", "鱼"].iter().enumerate() {
-        let reply = embed.ask(&request(&format!("r{k}"), text));
+    for (k, case) in expected().iter().enumerate() {
+        let reply = embed.ask(&request(&format!("r{k}"), &case.text));
         assert_eq!(reply["id"], json!(format!("r{k}")));
         let got = vector(&reply);
         assert!(
-            same(&got, &expected[k].vector),
-            "{text}：{got:?} 对 {:?}",
-            expected[k].vector
+            same(&got, &case.vector),
+            "{}：{got:?} 对 {:?}",
+            case.text,
+            case.vector
         );
     }
-    assert_eq!(embed.close(), Some(0), "标准输入关了就退出");
-}
-
-#[test]
-fn a_long_text_is_cut_and_an_empty_one_still_has_a_vector() {
-    let mut embed = Embed::tiny();
-    embed.line();
-    let expected = expected();
-    assert_eq!(expected[4].ids, [2, 5, 5, 5, 5, 3]);
-    let reply = embed.ask(&request("long", &"猫".repeat(30)));
-    assert!(
-        same(&vector(&reply), &expected[4].vector),
-        "照清单的 max_tokens 截，留住 [SEP]"
-    );
-    assert_eq!(expected[5].ids, [2, 3]);
     let reply = embed.ask(&request("empty", ""));
-    assert!(
-        same(&vector(&reply), &expected[5].vector),
-        "空的是 [CLS][SEP]"
-    );
-    embed.close();
+    assert_eq!(vector(&reply).len(), 4, "空的也有向量：{reply}");
+    assert_eq!(embed.close(), Some(0), "标准输入关了就退出");
 }
 
 #[test]
@@ -165,8 +147,9 @@ fn a_bad_line_gets_an_error_and_the_next_one_is_answered() {
     assert_eq!(reply, json!({"id": null, "error": "bad request: no id"}));
     let reply = embed.ask("");
     assert_eq!(reply["id"], Value::Null, "空行也回：{reply}");
-    let reply = embed.ask(&request("r2", "喝茶"));
-    assert!(same(&vector(&reply), &expected()[1].vector), "接着读下一行");
+    let case = &expected()[1];
+    let reply = embed.ask(&request("r2", &case.text));
+    assert!(same(&vector(&reply), &case.vector), "接着读下一行");
     // 不是 UTF-8 的一行。
     embed.input.write_all(b"\xff\xfe\n").expect("送得进");
     let reply = embed.line();
@@ -174,7 +157,7 @@ fn a_bad_line_gets_an_error_and_the_next_one_is_answered() {
         reply,
         json!({"id": null, "error": "bad request: not UTF-8"})
     );
-    let reply = embed.ask(&format!("{}\r", request("r3", "喝茶")));
+    let reply = embed.ask(&format!("{}\r", request("r3", &case.text)));
     assert_eq!(
         reply["id"],
         json!("r3"),
@@ -195,9 +178,33 @@ fn refused(manifest: &Path, dir: &Path) -> (Value, Option<i32>) {
     (reply, embed.close())
 }
 
+/// 一个临时目录：照 `tiny-bpe` 的文件拷几样进来，用完删掉。
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn with(name: &str, files: &[(&str, &str)]) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("miyu-embed-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建得了");
+        for (from, to) in files {
+            std::fs::copy(fixtures().join(from), dir.join(to)).expect("拷得了");
+        }
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "删不掉就留在临时目录里，不影响测试"
+    )]
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_bad_manifest_or_missing_files_exit_with_one() {
-    let tiny = fixtures().join("tiny");
+    let tiny = fixtures().join("tiny-bpe");
     let (reply, code) = refused(&tiny.join("nothing.toml"), &tiny);
     assert!(
         reply["error"]
@@ -215,10 +222,15 @@ fn a_bad_manifest_or_missing_files_exit_with_one() {
     );
     assert_eq!(code, Some(1));
     // 模型文件是坏的：照清单找得到，载入不了。
-    let (reply, code) = refused(
-        &fixtures().join("tiny/manifest.toml"),
-        &fixtures().join("broken"),
+    let broken = Scratch::with(
+        "broken",
+        &[
+            ("broken/model.onnx", "model.onnx"),
+            ("tiny-bpe/vocab.txt", "vocab.txt"),
+            ("tiny-bpe/merges.txt", "merges.txt"),
+        ],
     );
+    let (reply, code) = refused(&tiny.join("manifest.toml"), &broken.0);
     assert!(
         reply["error"]
             .as_str()
@@ -228,20 +240,58 @@ fn a_bad_manifest_or_missing_files_exit_with_one() {
     assert_eq!(code, Some(1));
 }
 
+/// 清单写 WordPiece、没写分词的（以前 bge 那样）：明说不支持，退出码 1（2026-10-19 随 bge 拿掉）。
+#[test]
+fn a_wordpiece_manifest_is_not_supported() {
+    let tiny = fixtures().join("tiny-bpe");
+    let text = std::fs::read_to_string(tiny.join("manifest.toml")).expect("读得了");
+    let start = text.find("[tokenizer]").expect("有分词那一段");
+    let end = text[start..]
+        .find("\n\n")
+        .map_or(text.len(), |at| start + at + 2);
+    // WordPiece 没有合并那一份：清单里也拿掉。
+    let merges = text
+        .find("[[files]]\nrole = \"merges\"")
+        .expect("有合并那一份");
+    let text = text[..merges].trim_end().to_string() + "\n";
+    let scratch = Scratch::with("wordpiece", &[]);
+    for (name, tokenizer) in [
+        ("unset.toml", ""),
+        ("wordpiece.toml", "[tokenizer]\nkind = \"wordpiece\"\n\n"),
+    ] {
+        let manifest = scratch.0.join(name);
+        std::fs::write(
+            &manifest,
+            format!("{}{tokenizer}{}", &text[..start], &text[end..]),
+        )
+        .expect("写得进");
+        let (reply, code) = refused(&manifest, &tiny);
+        assert_eq!(
+            reply["error"], "the WordPiece tokenizer is not supported; only byte-level BPE is",
+            "{name}：{reply}"
+        );
+        assert_eq!(code, Some(1));
+    }
+}
+
 #[test]
 fn a_manifest_with_the_wrong_dims_answers_each_line_with_an_error() {
-    let tiny = fixtures().join("tiny");
+    let tiny = fixtures().join("tiny-bpe");
+    let text = std::fs::read_to_string(tiny.join("manifest.toml")).expect("读得了");
+    let scratch = Scratch::with("dims", &[]);
+    let wrong = scratch.0.join("wrong-dims.toml");
+    std::fs::write(&wrong, text.replace("dims = 4", "dims = 5")).expect("写得进");
     let mut embed = Embed::spawn(&[
         "--manifest".as_ref(),
-        tiny.join("wrong-dims.toml").as_os_str(),
+        wrong.as_os_str(),
         "--dir".as_ref(),
         tiny.as_os_str(),
     ]);
     assert_eq!(
         embed.line(),
-        json!({"ready": {"model": "local:tiny", "dims": 5}})
+        json!({"ready": {"model": "local:tiny-bpe", "dims": 5}})
     );
-    let reply = embed.ask(&request("r1", "猫"));
+    let reply = embed.ask(&request("r1", "cat"));
     assert_eq!(
         reply,
         json!({"id": "r1", "error": "the model gives 4 dimensions, the manifest says 5"})
@@ -272,43 +322,6 @@ fn wrong_arguments_exit_with_two() {
             "{said}"
         );
     }
-}
-
-/// 小 BPE 对几句的编号和向量（`fixtures/tiny-bpe/expected.json`，施工 R-5 六补）。
-#[derive(Deserialize)]
-struct BpeExpected {
-    text: String,
-    vector: Vec<f32>,
-}
-
-/// 字节级 BPE、只有两个输入的小模型（施工 R-5 六补）：照清单切词、只喂模型要的两个输入，向量和 Python 的 ONNX Runtime 算的
-/// 逐个比，超长的照 `max_tokens` 截。
-#[test]
-fn a_bpe_model_with_two_inputs_answers_each_line() {
-    let dir = fixtures().join("tiny-bpe");
-    let mut embed = Embed::spawn(&[
-        "--manifest".as_ref(),
-        dir.join("manifest.toml").as_os_str(),
-        "--dir".as_ref(),
-        dir.as_os_str(),
-    ]);
-    assert_eq!(
-        embed.line(),
-        json!({"ready": {"model": "local:tiny-bpe", "dims": 4}})
-    );
-    let expected: Vec<BpeExpected> =
-        serde_json::from_str(&read("tiny-bpe/expected.json")).expect("合写法");
-    for (k, case) in expected.iter().enumerate() {
-        let reply = embed.ask(&request(&format!("b{k}"), &case.text));
-        let got = vector(&reply);
-        assert!(
-            same(&got, &case.vector),
-            "{}：{got:?} 对 {:?}",
-            case.text,
-            case.vector
-        );
-    }
-    assert_eq!(embed.close(), Some(0));
 }
 
 /// 清单写的 `merges` 不在、模型要一个不认识的输入：载入不了，退出码 1（施工 R-5 六补）。

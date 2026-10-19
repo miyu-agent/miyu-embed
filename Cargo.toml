@@ -23,8 +23,6 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 # 协议一行一个 JSON：请求照 `serde_json` 读，回应照 serde 写。
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# 分词要 Unicode 的类别：去掉控制、格式字符，标点单独成词（`wordpiece.rs`）。Apache-2.0，没有别的依赖。
-unicode-general-category = "1.1"
 # 字节级 BPE 切段的正则要往前看（`\s+(?!\S)`，`bpe.rs`），`regex` 不支持（施工 R-5 六补）。MIT；`regex-automata`、
 # `regex-syntax` 原来就有，多一个 `bit-set`（MIT OR Apache-2.0）。
 fancy-regex = "0.16"
