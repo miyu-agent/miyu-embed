@@ -1,0 +1,33 @@
+# 门禁：格式、clippy、每个文件不超过 500 行、测试，三种系统（同核心仓库）。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: 装上 rust-toolchain.toml 钉住的工具链
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: 格式
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: 行数
+        run: |
+          long=$(find src tests -name '*.rs' -exec awk 'END { if (NR > 500) print FILENAME ": " NR }' {} \;)
+          if [ -n "$long" ]; then echo "$long"; exit 1; fi
+      - name: 测试
+        run: cargo test --locked

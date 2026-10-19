@@ -3,6 +3,9 @@
 # 不发给模型。
 [package]
 protocol = [1, 1]
+version = "0.1.0"
+# 带本机程序：一种系统一个包文件（发版时照 .github/workflows/release.yml 打）。
+targets = ["linux-x86_64", "linux-aarch64", "macos-aarch64", "windows-x86_64"]
 name = { en = "Built-in semantic model", zh = "内置语义模型", ja = "内蔵の意味モデル" }
 summary = { en = "Search memories by meaning on this machine, no network needed", zh = "在本机照意思找记忆，不用联网", ja = "この機械の上で記憶を意味で探します。ネットは要りません" }
 
