@@ -12,3 +12,7 @@ miyu pkg install embed
 - 依赖核心的 `miyu-recall`（模型清单的类型），照 git 钉住核心的一个提交；升级核心就是改 `Cargo.toml` 里的 `rev`、刷 `Cargo.lock`、过 CI。
 
 核心仓库的施工单 R-5、S-7 记着它怎么来的。
+
+## 许可证
+
+这个仓库自己写的程序用 AGPL-3.0-or-later，见 `LICENSE`（2026-10-26 起，以前是 GPL-3.0-or-later）。不是这里写的东西照它们原来的许可证：模型 granite-embedding-97m-multilingual-r2 是 Apache-2.0（Release 里随模型附它的 `LICENSE`、`NOTICE`），静态链接进来的 ONNX Runtime 是 MIT（发行包随它附 `ThirdPartyNotices.txt`），Rust 依赖照各自的 `license`。
