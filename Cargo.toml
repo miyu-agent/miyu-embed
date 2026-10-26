@@ -4,7 +4,7 @@ description = "Miyu 的内置语义模型：照清单读一份模型，一行一
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 publish = false
 autotests = false
 
