@@ -26,7 +26,7 @@ jobs:
       contents: write
     with:
       package: embed
-      folder: package/embed
+      folder: package/miyu-embed
       target: ${{ matrix.target }}
       runs-on: ${{ matrix.os }}
       build: |
@@ -35,12 +35,12 @@ jobs:
         cargo build --release --locked
         exe=""
         if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
-        mkdir -p package/embed/bin
-        cp "target/release/miyu-embed$exe" package/embed/bin/
+        mkdir -p package/miyu-embed/bin
+        cp "target/release/miyu-embed$exe" package/miyu-embed/bin/
         base=https://github.com/miyu-agent/miyu-embed/releases/download/models-granite-embedding-97m-multilingual-r2
         for name in model_q4.onnx vocab.txt merges.txt LICENSE NOTICE SHA256SUMS; do
-          curl -fsSL --retry 3 -o "package/embed/$name" "$base/$name"
+          curl -fsSL --retry 3 -o "package/miyu-embed/$name" "$base/$name"
         done
-        cd package/embed
+        cd package/miyu-embed
         if command -v sha256sum > /dev/null; then sha256sum -c SHA256SUMS; else shasum -a 256 -c SHA256SUMS; fi
         rm SHA256SUMS

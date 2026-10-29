@@ -6,7 +6,7 @@ use miyu_config::package::{PackageKind, Target, read};
 
 #[test]
 fn the_package_is_a_worker_for_four_targets() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("package/embed/package.toml");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("package/miyu-embed/package.toml");
     let embed = read(&std::fs::read_to_string(&path).expect("有清单")).expect("写法对");
     assert_eq!(embed.kind, PackageKind::Worker);
     assert_eq!(
