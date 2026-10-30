@@ -15,4 +15,4 @@ miyu pkg install embed
 
 ## 许可证
 
-这个仓库自己写的程序用 AGPL-3.0-or-later，见 `LICENSE`（2026-10-26 起，以前是 GPL-3.0-or-later）。不是这里写的东西照它们原来的许可证：模型 granite-embedding-97m-multilingual-r2 是 Apache-2.0（Release 里随模型附它的 `LICENSE`、`NOTICE`），静态链接进来的 ONNX Runtime 是 MIT（发行包随它附 `ThirdPartyNotices.txt`），Rust 依赖照各自的 `license`。
+这个仓库自己写的程序用 AGPL-3.0-or-later，见 `LICENSE`（2026-10-26 起，以前是 GPL-3.0-or-later）。不是这里写的东西照它们原来的许可证：模型 granite-embedding-97m-multilingual-r2 是 Apache-2.0（发行包里叫 `LICENSE-model`、`NOTICE-model`），静态链接进来的 ONNX Runtime 1.28.0 是 MIT（原文和它的第三方声明在 `licenses/onnxruntime/`，发行包里叫 `LICENSE-onnxruntime`、`ThirdPartyNotices-onnxruntime.txt`），发行包的 `LICENSE` 是本仓库的 AGPL；Rust 依赖照各自的 `license`。
