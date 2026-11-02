@@ -230,7 +230,18 @@ fn a_bad_manifest_or_missing_files_exit_with_one() {
             ("tiny-bpe/merges.txt", "merges.txt"),
         ],
     );
-    let (reply, code) = refused(&tiny.join("manifest.toml"), &broken.0);
+    // 大小先核：清单里模型的大小改成这份坏文件的，才轮到 ONNX Runtime 说载入不了。
+    let size = std::fs::metadata(broken.0.join("model.onnx"))
+        .expect("有")
+        .len();
+    let text = std::fs::read_to_string(tiny.join("manifest.toml")).expect("读得了");
+    let manifest = broken.0.join("manifest.toml");
+    std::fs::write(
+        &manifest,
+        text.replace("size = 10132", &format!("size = {size}")),
+    )
+    .expect("写得进");
+    let (reply, code) = refused(&manifest, &broken.0);
     assert!(
         reply["error"]
             .as_str()
@@ -347,7 +358,9 @@ fn a_bpe_model_without_merges_or_with_an_odd_input_exits_with_one() {
     let text = std::fs::read_to_string(&manifest).expect("读得了");
     std::fs::write(
         &odd,
-        text.replace("name = \"model.onnx\"", "name = \"odd-input.onnx\""),
+        // 大小也要换成这份文件的：载入先核大小，再轮到 ONNX Runtime 说不认识的输入。
+        text.replace("name = \"model.onnx\"", "name = \"odd-input.onnx\"")
+            .replace("size = 10132", "size = 10173"),
     )
     .expect("写得进");
     let (reply, code) = refused(&odd, &scratch);
@@ -358,5 +371,38 @@ fn a_bpe_model_without_merges_or_with_an_odd_input_exits_with_one() {
         "{reply}"
     );
     assert_eq!(code, Some(1));
+    std::fs::remove_dir_all(&scratch).expect("删得了");
+}
+
+/// 审计第四轮 E-3：每个文件的大小要和清单对得上，短了（截断）、长了（换了别的）都在载入时拒，一行说清是哪个文件。
+#[test]
+fn a_file_whose_size_differs_from_the_manifest_is_refused() {
+    let source = fixtures().join("tiny-bpe");
+    let scratch = std::env::temp_dir().join(format!("miyu-embed-size-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("建得了");
+    for name in ["vocab.txt", "merges.txt", "model.onnx"] {
+        std::fs::copy(source.join(name), scratch.join(name)).expect("拷得了");
+    }
+    let manifest = source.join("manifest.toml");
+    for name in ["vocab.txt", "merges.txt", "model.onnx"] {
+        let path = scratch.join(name);
+        let whole = std::fs::read(&path).expect("读得了");
+        for changed in [
+            &whole[..whole.len() - 1],
+            &[whole.as_slice(), b"\n"].concat(),
+        ] {
+            std::fs::write(&path, changed).expect("写得进");
+            let (reply, code) = refused(&manifest, &scratch);
+            let want = format!(
+                "{} is {} bytes, the manifest says {}",
+                path.display(),
+                changed.len(),
+                whole.len()
+            );
+            assert_eq!(reply, json!({ "error": want }));
+            assert_eq!(code, Some(1));
+        }
+        std::fs::write(&path, &whole).expect("写得进");
+    }
     std::fs::remove_dir_all(&scratch).expect("删得了");
 }

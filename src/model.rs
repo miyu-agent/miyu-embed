@@ -49,6 +49,15 @@ impl Input {
 pub enum LoadError {
     /// 清单写的文件在目录里没有。
     Missing(PathBuf),
+    /// 文件的大小和清单写的对不上（截断了、换成了别的文件）。只比大小不算 SHA-256：这里每次起来都要查，要便宜。
+    Size {
+        /// 哪个文件。
+        path: PathBuf,
+        /// 实际多少字节。
+        got: u64,
+        /// 清单写的。
+        want: u64,
+    },
     /// 词表（BPE 的另有合并）读不了、不合写法。
     Vocab {
         /// 哪个文件。
@@ -71,6 +80,11 @@ impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadError::Missing(path) => write!(f, "cannot find {}", path.display()),
+            LoadError::Size { path, got, want } => write!(
+                f,
+                "{} is {got} bytes, the manifest says {want}",
+                path.display()
+            ),
             LoadError::Vocab { path, error } => {
                 write!(f, "cannot read {}: {error}", path.display())
             }
@@ -127,7 +141,7 @@ impl Embedder {
     ///
     /// # Errors
     ///
-    /// 文件没有，词表（BPE 的另有合并）读不了、不合写法，ONNX Runtime 载入不了模型，模型要的输入不认识。
+    /// 文件没有、大小和清单对不上，词表（BPE 的另有合并）读不了、不合写法，ONNX Runtime 载入不了模型，模型要的输入不认识。
     pub fn load(manifest: Manifest, dir: &Path) -> Result<Embedder, LoadError> {
         let model = dir.join(&manifest.file(Role::Model).name);
         let vocab = dir.join(&manifest.file(Role::Vocab).name);
@@ -137,9 +151,25 @@ impl Embedder {
             }
             manifest::Tokenizer::Bpe { .. } => dir.join(&manifest.file(Role::Merges).name),
         };
-        for path in [&model, &vocab, &merges] {
+        for (role, path) in [
+            (Role::Model, &model),
+            (Role::Vocab, &vocab),
+            (Role::Merges, &merges),
+        ] {
             if !path.is_file() {
                 return Err(LoadError::Missing(path.clone()));
+            }
+            // 核心第一次用时核过 SHA-256，但之后每次拉起不再核：这里比大小，截断的、换了的文件当场拒。
+            let want = manifest.file(role).size;
+            let got = std::fs::metadata(path)
+                .map_err(|_| LoadError::Missing(path.clone()))?
+                .len();
+            if got != want {
+                return Err(LoadError::Size {
+                    path: path.clone(),
+                    got,
+                    want,
+                });
             }
         }
         // 切词表（granite 那份六十来万条，约 150 毫秒）和 ONNX Runtime 建会话（约 170 毫秒）各不相干，一起做；算向量照旧单线程。
