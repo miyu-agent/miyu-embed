@@ -29,13 +29,60 @@ pub fn serve(
     input: impl BufRead,
     mut output: impl Write,
 ) -> io::Result<()> {
-    for line in input.split(b'\n') {
-        let reply = answer(embedder, &line?);
+    let cap = embedder.line_cap();
+    let mut input = input;
+    while let Some(line) = read_line(&mut input, cap)? {
+        let reply = match line {
+            Line::Whole(line) => answer(embedder, &line),
+            Line::TooLong => Reply::Error {
+                id: None,
+                error: format!("bad request: line is longer than {cap} bytes"),
+            },
+        };
         serde_json::to_writer(&mut output, &reply).map_err(io::Error::other)?;
         output.write_all(b"\n")?;
         output.flush()?;
     }
     Ok(())
+}
+
+/// 读到的一行。
+enum Line {
+    /// 整行（不含 `\n`）。
+    Whole(Vec<u8>),
+    /// 超过上限：多出来的没有存，这一行剩下的已经读掉丢了。
+    TooLong,
+}
+
+/// 读一行：一个字节都没有了（输入读完）交回 `None`。超过 `cap` 个字节的不再往内存里存，把这一行读到头再交回
+/// [`Line::TooLong`]，下一次接着读下一行。最后一行没有 `\n` 结尾也算一行。
+fn read_line(input: &mut impl BufRead, cap: usize) -> io::Result<Option<Line>> {
+    let mut kept = Vec::new();
+    let (mut any, mut too_long) = (false, false);
+    loop {
+        let buf = input.fill_buf()?;
+        if buf.is_empty() {
+            break;
+        }
+        any = true;
+        let newline = buf.iter().position(|byte| *byte == b'\n');
+        let chunk = &buf[..newline.unwrap_or(buf.len())];
+        if kept.len() + chunk.len() > cap {
+            too_long = true;
+        } else if !too_long {
+            kept.extend_from_slice(chunk);
+        }
+        let used = chunk.len() + usize::from(newline.is_some());
+        input.consume(used);
+        if newline.is_some() {
+            break;
+        }
+    }
+    Ok(match (any, too_long) {
+        (false, _) => None,
+        (true, true) => Some(Line::TooLong),
+        (true, false) => Some(Line::Whole(kept)),
+    })
 }
 
 /// 回一行请求（行尾的 `\r` 是 JSON 的空白，照常读）。

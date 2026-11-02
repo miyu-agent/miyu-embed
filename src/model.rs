@@ -190,6 +190,15 @@ impl Embedder {
         })
     }
 
+    /// 一行请求最长读多少字节，超了的不存内存、回一句错。
+    ///
+    /// `text` 里至多前 [`crate::bpe::REGEX_BYTES`] 个字节会进分词（`Tokenizer::window` 再往下压），更长的部分白读；一个字节在
+    /// JSON 里最长写成 `\u00XX`（6 个字节，控制字符），所以文字部分至多 6 倍于它；再留 4 KiB 给 `id` 和外壳。照硬顶、不照这份
+    /// 词表的窗口算：上限是一个和词表无关的常数，核心照同一个数在发之前截短（核心 `embed.rs` 的 `MAX_TEXT`），就不会撞上。
+    pub fn line_cap(&self) -> usize {
+        crate::bpe::REGEX_BYTES * 6 + 4096
+    }
+
     /// 向量记的模型编号（`local:<id>`）。
     pub fn model(&self) -> String {
         self.manifest.model()

@@ -69,6 +69,15 @@ impl Embed {
         self.line()
     }
 
+    /// 关掉标准输入，读剩下的一行回应。
+    fn close_and_read(mut self) -> Value {
+        drop(self.input);
+        let mut line = String::new();
+        self.output.read_line(&mut line).expect("读得了");
+        self.child.wait().expect("等得到");
+        serde_json::from_str(&line).unwrap_or_else(|error| panic!("{line:?} 不是 JSON：{error}"))
+    }
+
     /// 关掉标准输入，等它退出，交回退出码。
     fn close(self) -> Option<i32> {
         let Embed {
@@ -405,4 +414,28 @@ fn a_file_whose_size_differs_from_the_manifest_is_refused() {
         std::fs::write(&path, &whole).expect("写得进");
     }
     std::fs::remove_dir_all(&scratch).expect("删得了");
+}
+
+/// 审计第四轮 E-4：一行请求超过上限，不整行读进内存：回一句错（`id` 是 null），把这一行剩下的读掉，接着答下一行；最后一行没有
+/// 换行结尾也照答。
+#[test]
+fn a_line_over_the_cap_is_refused_and_the_next_one_is_answered() {
+    let mut embed = Embed::tiny();
+    embed.line();
+    let huge = format!(r#"{{"id":"big","text":"{}"}}"#, "a".repeat(8 << 20));
+    let reply = embed.ask(&huge);
+    let said = reply["error"].as_str().expect("有错");
+    assert!(
+        said.starts_with("bad request: line is longer than "),
+        "{reply}"
+    );
+    assert_eq!(reply["id"], Value::Null);
+    let after = embed.ask(&request("r2", "cat"));
+    assert_eq!(after["id"], "r2");
+    assert!(after["vector"].is_array(), "{after}");
+    // 刚好在上限里面的照常答：8 个词用不了多少字，上限远大于它。
+    let near = embed.ask(&request("r3", &"a".repeat(2000)));
+    assert_eq!(near["id"], "r3");
+    write!(embed.input, "{}", request("r4", "dog")).expect("送得进");
+    assert_eq!(embed.close_and_read()["id"], "r4");
 }

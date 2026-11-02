@@ -88,7 +88,7 @@ pub struct Tokenizer {
 
 /// 交给切段正则的字节数的硬顶。`fancy-regex` 的回溯栈有限：实测（见 `tests/bpe.rs`）连着 50 万个空白不出错、100 万个就
 /// `StackOverflow`。取 256 KiB，离出错的位置隔着一倍多。
-const REGEX_BYTES: usize = 256 * 1024;
+pub const REGEX_BYTES: usize = 256 * 1024;
 
 /// 词表、合并读不出来。
 #[derive(Debug, Clone, PartialEq, Eq)]
