@@ -9,7 +9,7 @@
 """
 import hashlib, json, os, sys
 
-# 和 crates/miyu-embed/src/bpe.rs 的 SPLIT 一字不差。
+# 和 src/bpe.rs 的 SPLIT 比只多一支 \s+(?!\S)（Rust 里为躲回溯栈溢出拿掉了，由 encode 退一个字补上，tests/bpe.rs 逐个比过）。
 SPLIT = (
     r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
     r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?"

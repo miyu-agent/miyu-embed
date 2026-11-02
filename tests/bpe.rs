@@ -208,3 +208,87 @@ fn the_granite_vocab_agrees_with_the_reference() {
     matches_all(&tokenizer, &cases);
     println!("{} 句一字不差", cases.len());
 }
+
+/// 审计第四轮（2026-11-02）：`encode` 里说「回溯超了上限才会出错（这条正则只往前看一个字，碰不到）」，可一百万个连着的空白
+/// （`\s+(?!\S)` 那一支）就超了 `fancy-regex` 的回溯栈；出错以后剩下的整段当一段合并，切法和 `tokenizers` 不一样，后面多长都
+/// 照字节合一遍。
+#[test]
+fn the_split_never_gives_up_on_a_long_run_of_spaces() {
+    let split = fancy_regex::Regex::new(miyu_embed::bpe::SPLIT).expect("合写法");
+    let text = format!("{}x", " ".repeat(1 << 20));
+    let failed = split.find_iter(&text).find_map(Result::err);
+    assert!(failed.is_none(), "切段出错：{failed:?}");
+}
+
+/// 审计第四轮：截断只在段和段之间看（`ids.len() >= keep`），一段之内不看：一长串不带空白的字（几 MB 的字母、汉字）整段照字节
+/// 合并，只留前 512 个，花的时间、内存照整段的长度长。照 `limit` 截的，花的应该和一句短话差不多。
+#[test]
+fn one_long_word_costs_about_as_much_as_the_limit() {
+    let tokenizer = tiny();
+    let text = "a".repeat(4 << 20);
+    let started = std::time::Instant::now();
+    let ids = tokenizer.encode(&text, 512);
+    let took = started.elapsed();
+    assert_eq!(ids.len(), 512);
+    assert!(
+        took < std::time::Duration::from_millis(100),
+        "4 MB 一段截到 512 个花了 {took:?}"
+    );
+}
+
+/// 审计第四轮 E-1 的修法拿掉了 `\s+(?!\S)` 一支（长空白会让 `fancy-regex` 的回溯栈溢出），改在 `encode` 里退一个字：拿原来
+/// 带那一支的正则逐个比，空白、换行、字母、数字、符号、全角空白随机拼，切出来的一段段要一模一样。
+#[test]
+fn the_split_without_lookahead_cuts_like_the_reference_regex() {
+    let reference =
+        fancy_regex::Regex::new(&miyu_embed::bpe::SPLIT.replace(r"|\s+", r"|\s+(?!\S)|\s+"))
+            .expect("合写法");
+    assert!(reference.as_str().contains("(?!\\S)"));
+    let tokenizer = tiny();
+    let alphabet: Vec<char> = " \t\n\r a1.é'x\u{3000}\u{a0}字".chars().collect();
+    let mut state = 12345_u64;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) as usize
+    };
+    for _ in 0..100_000 {
+        let text: String = (0..next() % 24)
+            .map(|_| alphabet[next() % alphabet.len()])
+            .collect();
+        let want: Vec<&str> = reference
+            .find_iter(&text)
+            .map(|found| found.expect("短句不出错").as_str())
+            .collect();
+        assert_eq!(tokenizer.pieces(&text), want, "{text:?}");
+    }
+}
+
+/// 截短的字节数落在字中间时往前退到字边界，不 panic；整段汉字、`window` 以内的都照常。
+#[test]
+fn the_cut_lands_on_a_char_boundary() {
+    let tokenizer = tiny();
+    for text in [
+        "字".repeat(100_000),
+        "é".repeat(100_000),
+        "😀".repeat(100_000),
+    ] {
+        assert_eq!(tokenizer.encode(&text, 8).len(), 8);
+    }
+}
+
+/// 按字节截短不动前 `limit` 个词：几百 KB 的混合文字截到 8 个，和只给开头一小段的结果一样。
+#[test]
+fn the_byte_cut_keeps_the_first_tokens() {
+    let tokenizer = tiny();
+    let unit = "hello  world 你好, it's 42 \n\n  x";
+    let long = unit.repeat(20_000);
+    let short = unit.repeat(40);
+    for limit in [2, 3, 8, 20] {
+        assert_eq!(
+            tokenizer.encode(&long, limit),
+            tokenizer.encode(&short, limit)
+        );
+    }
+}

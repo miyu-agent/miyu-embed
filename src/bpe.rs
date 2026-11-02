@@ -15,11 +15,13 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use fancy_regex::Regex;
 
-/// 切段的正则：GPT-4o（o200k）那一条，和 `tools/bpe_files.py` 的 `SPLIT` 一字不差（转换脚本只收这一条）。
+/// 切段的正则：GPT-4o（o200k）那一条，只少了 `\s+(?!\S)` 这一支（`tools/bpe_files.py` 的 `SPLIT` 有，给 `tokenizers` 对照用）。
+/// 这一支的意思是「连着的空白，后面还有字的话留最后一个给后面」：`fancy-regex` 的回溯栈为它每个空白存一格，一百万个就
+/// `StackOverflow`。切法没变：`encode` 在 `\s+` 切到一串空白以后自己退一个字（`tests/bpe.rs` 拿原正则逐个比）。
 pub const SPLIT: &str = concat!(
     r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
     r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
-    r"|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+    r"|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+",
 );
 
 /// 查词表、合并用的哈希：FxHash 的做法（一次一个字长，乘一个常数）。载入时要查六十来万次，标准库的 SipHash 慢一倍多；
@@ -80,7 +82,13 @@ pub struct Tokenizer {
     split: Regex,
     start: u32,
     end: u32,
+    /// 词表里最长的一个词有几个字节（词里每个字对应一个字节，所以就是字数）。
+    longest: usize,
 }
+
+/// 交给切段正则的字节数的硬顶。`fancy-regex` 的回溯栈有限：实测（见 `tests/bpe.rs`）连着 50 万个空白不出错、100 万个就
+/// `StackOverflow`。取 256 KiB，离出错的位置隔着一倍多。
+const REGEX_BYTES: usize = 256 * 1024;
 
 /// 词表、合并读不出来。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +125,15 @@ impl fmt::Display for FilesError {
 }
 
 impl std::error::Error for FilesError {}
+
+/// 不超过 `at` 的最大的字边界。
+fn floor_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
 
 /// GPT-2 的字节到字：看得见的（`!` 到 `~`、`¡` 到 `¬`、`®` 到 `ÿ`）照原样，别的照先后挪到 `U+0100` 以后。
 fn byte_chars() -> [char; 256] {
@@ -192,6 +209,11 @@ impl Tokenizer {
                 return Err(FilesError::Twice(line_no));
             }
         }
+        let longest = words
+            .keys()
+            .map(|word| word.chars().count())
+            .max()
+            .unwrap_or(1);
         words.shrink_to_fit();
         pairs.shrink_to_fit();
         Ok(Tokenizer {
@@ -203,28 +225,64 @@ impl Tokenizer {
             split: Regex::new(SPLIT).expect("SPLIT 是合写法的正则"),
             start,
             end,
+            longest,
         })
+    }
+
+    /// `encode` 往后看多少字节：前 `keep` 个词用得着的字节数，再多留一个最长词作余量。
+    ///
+    /// 一个词至多 `longest` 个字节，前 `keep` 个词合起来不会超过 `keep * longest` 个字节；再多留一个词的长度，是为了让落在截断处
+    /// 的那一段不影响前 `keep` 个词（合并只看一段之内、正则只往前看一个字）。例外：词表里没有的字节会被丢掉（不占词），
+    /// 一大片这样的字节会让截断前移，多出来的词落在 `keep` 之后，只在这种极少见的输入里前 `keep` 个词才可能和不截断时不同。
+    /// 再受 `REGEX_BYTES`（256 KiB）约束。
+    pub fn window(&self, keep: usize) -> usize {
+        keep.saturating_add(1)
+            .saturating_mul(self.longest)
+            .min(REGEX_BYTES)
+    }
+
+    /// 从 `at` 起的下一段（切段正则出错、没有了都是 `None`）。这条正则每个字都有一支接得住（字母、数字、空白、别的），段和段之间
+    /// 没有漏下的字，`tokenizers` 单独切的空隙这里碰不到。
+    fn next_piece<'a>(&self, text: &'a str, at: usize) -> Option<(&'a str, usize)> {
+        let found = self.split.find_from_pos(text, at).ok()??;
+        let piece = found.as_str();
+        // 带换行的空白由 `\s*[\r\n]+` 一支接走了，剩下的纯空白是 `\s+` 一支切的：后面还有字的话，退最后一个字给后面。
+        if found.end() < text.len()
+            && piece.chars().all(char::is_whitespace)
+            && !piece.contains(['\r', '\n'])
+            && let Some((cut, _)) = piece.char_indices().next_back().filter(|(cut, _)| *cut > 0)
+        {
+            return Some((&piece[..cut], found.start() + cut));
+        }
+        Some((piece, found.end()))
+    }
+
+    /// `text` 切出来的一段段字（不看长短，调试和对照用）。
+    pub fn pieces<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        let (mut at, mut pieces) = (0, Vec::new());
+        while let Some((piece, next)) = self.next_piece(text, at) {
+            at = next;
+            pieces.push(piece);
+        }
+        pieces
     }
 
     /// 把 `text` 切成编号：`start`、一段段的词、`end`。超过 `limit` 个的截掉后面的，留住 `end`；够了就不再往后切。`limit`
     /// 至少是 2（清单查过），更小的照 2 算。
     pub fn encode(&self, text: &str, limit: usize) -> Vec<i64> {
         let keep = limit.max(2) - 1;
+        // 先按字节截短（落在字的边界上）：一段之内不看长短，过长的输入既喂不进正则（E-1），整段合并也白花时间、内存（E-2）。
+        let text = &text[..floor_boundary(text, self.window(keep))];
         let mut ids = vec![self.start];
-        let mut last = 0;
-        for found in self.split.find_iter(text) {
-            if ids.len() >= keep {
-                break;
-            }
-            // 回溯超了 `fancy-regex` 的上限才会出错（这条正则只往前看一个字，碰不到）：剩下的当一段。
-            let Ok(found) = found else {
-                self.piece(&text[last..], &mut ids);
+        let mut at = 0;
+        while ids.len() < keep {
+            // 输入已经截到 `REGEX_BYTES` 以内，回溯栈碰不到。万一出错也不把剩下的当一段合并（切法会和 `tokenizers` 不同）：
+            // 就用切到的这些。
+            let Some((piece, next)) = self.next_piece(text, at) else {
                 break;
             };
-            // 这条正则每个字都有一支接得住（字母、数字、空白、别的），段和段之间没有漏下的字，`tokenizers` 单独切的空隙
-            // 这里碰不到。
-            self.piece(found.as_str(), &mut ids);
-            last = found.end();
+            self.piece(piece, &mut ids);
+            at = next;
         }
         ids.truncate(keep);
         ids.push(self.end);
