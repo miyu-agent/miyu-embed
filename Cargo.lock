@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "miyu-embed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fancy-regex",
  "miyu-config",
