@@ -1,5 +1,5 @@
 # 发版：打 tag（v 加上 Cargo.toml、package.toml 里的版本）就照官方的打包模板一种系统打一个包文件，传进这个 tag 的 Release。
-# 软件源每天收一次，收进索引以后 `miyu pkg install miyu-embed` 就装得上。模型文件取本仓库的 Release
+# 软件源每天收一次，收进索引以后 `miyu pkg install embed` 就装得上（包编号 `embed`，11-12 起不带 miyu-；程序照旧叫 miyu-embed）。模型文件取本仓库的 Release
 # models-granite-embedding-97m-multilingual-r2，照 SHA256SUMS 核对。
 name: release
 
@@ -25,8 +25,8 @@ jobs:
     permissions:
       contents: write
     with:
-      package: miyu-embed
-      folder: package/miyu-embed
+      package: embed
+      folder: package/embed
       target: ${{ matrix.target }}
       runs-on: ${{ matrix.os }}
       build: |
@@ -35,13 +35,13 @@ jobs:
         cargo build --release --locked
         exe=""
         if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
-        mkdir -p package/miyu-embed/bin
-        cp "target/release/miyu-embed$exe" package/miyu-embed/bin/
+        mkdir -p package/embed/bin
+        cp "target/release/miyu-embed$exe" package/embed/bin/
         base=https://github.com/miyu-agent/miyu-embed/releases/download/models-granite-embedding-97m-multilingual-r2
         for name in model_q4.onnx vocab.txt merges.txt LICENSE NOTICE SHA256SUMS; do
-          curl -fsSL --retry 3 -o "package/miyu-embed/$name" "$base/$name"
+          curl -fsSL --retry 3 -o "package/embed/$name" "$base/$name"
         done
-        cd package/miyu-embed
+        cd package/embed
         if command -v sha256sum > /dev/null; then sha256sum -c SHA256SUMS; else shasum -a 256 -c SHA256SUMS; fi
         rm SHA256SUMS
         # 许可证（LIC-2，发布前审计 10-30）：模型那两份改名，免得看的人以为整个包都是 Apache；本仓库的代码是 AGPL；
