@@ -1,9 +1,9 @@
 # 内置语义模型（施工 R-5 三补，设计 30 第六节；R-5 七补换成 granite-embedding-97m-multilingual-r2）：小程序包，出厂不装；包文件夹
-# 里放 model.toml 和它写的三个模型文件，miyu-embed 放在包文件夹的 bin/ 或 miyu 旁边。人格记忆的清单推荐它（[recommends] workers = ["miyu-embed"]，包编号施工 PN-4 起是 miyu-embed，设计 48）。给人看的字，
+# 里放 model.toml 和它写的三个模型文件，miyu-embed 放在包文件夹的 bin/ 或 miyu 旁边。人格记忆的清单推荐它（[recommends] workers = ["embed"]，包编号施工 PN-5 起是 embed，设计 48）。给人看的字，
 # 不发给模型。
 [package]
 protocol = [1, 1]
-version = "0.1.1"
+version = "0.1.2"
 # 带本机程序：一种系统一个包文件（发版时照 .github/workflows/release.yml 打）。
 targets = ["linux-x86_64", "linux-aarch64", "macos-aarch64", "windows-x86_64"]
 name = { en = "Built-in semantic model", zh = "内置语义模型", ja = "内蔵の意味モデル" }

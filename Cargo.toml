@@ -1,7 +1,7 @@
 [package]
 name = "miyu-embed"
 description = "Miyu 的内置语义模型：照清单读一份模型，一行一句话进、一行一个向量出（核心仓库施工 R-5 上，S-7 拆出来）"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.97"
 license = "AGPL-3.0-or-later"
