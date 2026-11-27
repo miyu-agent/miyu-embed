@@ -29,13 +29,18 @@ fancy-regex = "0.16"
 # 清单的类型（施工 R-5 中挪过去的，`miyu_recall::embedding`）：核心也照它读，两边一份。
 miyu-recall = { git = "https://github.com/miyu-agent/miyu", rev = "9c287842826ae00b4b6680e55f5dd912374f353b" }
 
+# 查表用的大权重映射进来、不拷进匿名内存（EM-4，`src/mapped.rs`）：只在 Unix 上用。MIT OR Apache-2.0。
+[target.'cfg(unix)'.dependencies]
+memmap2 = "0.9"
+
 [dev-dependencies]
 # 包的清单照核心的读法查（tests/package.rs）。
 miyu-config = { git = "https://github.com/miyu-agent/miyu", rev = "9c287842826ae00b4b6680e55f5dd912374f353b" }
 
 # 同核心（核心仓库根目录的 Cargo.toml）。
 [lints.rust]
-unsafe_code = "forbid"
+# 核心是 forbid；这里是 deny，只有 `src/mapped.rs` 一个文件允许（映射模型文件、把映射的地址交给 ONNX Runtime，EM-4）。
+unsafe_code = "deny"
 unused_must_use = "deny"
 missing_docs = "warn"
 

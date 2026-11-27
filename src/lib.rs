@@ -4,6 +4,7 @@
 
 pub mod bpe;
 pub mod manifest;
+mod mapped;
 pub mod model;
 pub mod serve;
 mod words;

@@ -9,6 +9,7 @@ use ort::value::Tensor;
 
 use crate::bpe;
 use crate::manifest::{self, Manifest, Pooling, Role};
+use crate::mapped::{self, Mapping};
 
 /// 一份载入了的模型。
 #[derive(Debug)]
@@ -18,6 +19,8 @@ pub struct Embedder {
     /// 模型声明了的几个输入，照它声明的先后（R-5 六补：granite 没有 `token_type_ids`）。
     inputs: Vec<Input>,
     manifest: Manifest,
+    /// 映射着的模型文件（EM-4，`mapped.rs`）：会话直接用着里面的几段。排在 `session` 后面：字段照先后放，会话先放、它后放。
+    _mapping: Option<Mapping>,
 }
 
 /// 照清单的分词：只有字节级 BPE（WordPiece 2026-10-19 随 bge 拿掉）。装箱：正则、两张表，挺大。
@@ -181,12 +184,13 @@ impl Embedder {
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
             (tokenizer, session)
         });
-        let (tokenizer, (session, inputs)) = (tokenizer?, session?);
+        let (tokenizer, (session, inputs, mapping)) = (tokenizer?, session?);
         Ok(Embedder {
             session,
             tokenizer,
             inputs,
             manifest,
+            _mapping: mapping,
         })
     }
 
@@ -262,14 +266,19 @@ fn tokenizer(manifest: &Manifest, vocab: &Path, merges: &Path) -> Result<Tokeniz
         .map_err(|error| bad(vocab, error.to_string()))
 }
 
-/// ONNX Runtime 载入模型（一次一条、单线程），连同它声明的几个输入：只认三种，要别的、没有 `input_ids` 的载入不了。
-fn session(model: &Path) -> Result<(Session, Vec<Input>), LoadError> {
+/// ONNX Runtime 载入模型（一次一条、单线程），连同它声明的几个输入：只认三种，要别的、没有 `input_ids` 的载入不了。查表用的大
+/// 权重映射着用（[`mapped::lookup_tables`]），映射一起交回，要比会话活得久。
+fn session(model: &Path) -> Result<(Session, Vec<Input>, Option<Mapping>), LoadError> {
     // 每一步的错各是一种类型（带着造到一半的那一个），都照原话交上去。
     let failed = |error: &dyn fmt::Display| LoadError::Model {
         path: model.to_path_buf(),
         error: error.to_string(),
     };
-    let session = Session::builder()
+    let (mapping, tables) = match mapped::lookup_tables(model).map_err(|error| failed(&error))? {
+        Some((mapping, tables)) => (Some(mapping), tables),
+        None => (None, Vec::new()),
+    };
+    let mut builder = Session::builder()
         .map_err(|error| failed(&error))?
         .with_intra_threads(1)
         .map_err(|error| failed(&error))?
@@ -279,7 +288,14 @@ fn session(model: &Path) -> Result<(Session, Vec<Input>), LoadError> {
         // 不还给系统；这个进程常驻、一句一句地算，那 40 MB 就一直白占。关了以后中间结果每次向分配器要、用完就还，
         // 实测长句慢约 6%，短句不变。
         .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(|error| failed(&error))?
+        .map_err(|error| failed(&error))?;
+    // 顶替模型里的同名初始值：ONNX Runtime 直接用映射的那一段，不再拷一份。
+    for (name, table) in tables {
+        builder = builder
+            .with_initializer(name, table)
+            .map_err(|error| failed(&error))?;
+    }
+    let session = builder
         .commit_from_file(model)
         .map_err(|error| failed(&error))?;
     let mut inputs = Vec::new();
@@ -293,7 +309,7 @@ fn session(model: &Path) -> Result<(Session, Vec<Input>), LoadError> {
     if !inputs.contains(&Input::Ids) {
         return Err(failed(&"the model has no input named input_ids"));
     }
-    Ok((session, inputs))
+    Ok((session, inputs, mapping))
 }
 
 /// `vector` 除以它的长度：以后照点积算相似度（`recall.md` 第三条第 2 款）。
