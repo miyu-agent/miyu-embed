@@ -275,6 +275,11 @@ fn session(model: &Path) -> Result<(Session, Vec<Input>), LoadError> {
         .map_err(|error| failed(&error))?
         .with_inter_threads(1)
         .map_err(|error| failed(&error))?
+        // 不用 CPU 的内存池（EM-2）：开着的时候，算过一句长的（约 512 个词），池子照最大的那次涨上去约 40 MB，以后一直留着、
+        // 不还给系统；这个进程常驻、一句一句地算，那 40 MB 就一直白占。关了以后中间结果每次向分配器要、用完就还，
+        // 实测长句慢约 6%，短句不变。
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+        .map_err(|error| failed(&error))?
         .commit_from_file(model)
         .map_err(|error| failed(&error))?;
     let mut inputs = Vec::new();
