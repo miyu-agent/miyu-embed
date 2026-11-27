@@ -33,13 +33,18 @@ miyu-recall = { git = "https://github.com/miyu-agent/miyu", rev = "9c287842826ae
 [target.'cfg(unix)'.dependencies]
 memmap2 = "0.9"
 
+# 载入完了把空着的页还给系统（EM-5，`src/trim.rs`）：`malloc_trim` 只有 glibc 有。MIT OR Apache-2.0。
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # 包的清单照核心的读法查（tests/package.rs）。
 miyu-config = { git = "https://github.com/miyu-agent/miyu", rev = "9c287842826ae00b4b6680e55f5dd912374f353b" }
 
 # 同核心（核心仓库根目录的 Cargo.toml）。
 [lints.rust]
-# 核心是 forbid；这里是 deny，只有 `src/mapped.rs` 一个文件允许（映射模型文件、把映射的地址交给 ONNX Runtime，EM-4）。
+# 核心是 forbid；这里是 deny，只有 `src/mapped.rs`（映射模型文件、把映射的地址交给 ONNX Runtime，EM-4）和
+# `src/trim.rs`（调 glibc 的 `malloc_trim`，EM-5）两个文件允许。
 unsafe_code = "deny"
 unused_must_use = "deny"
 missing_docs = "warn"

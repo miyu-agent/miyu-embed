@@ -248,6 +248,7 @@ name = "miyu-embed"
 version = "0.1.2"
 dependencies = [
  "fancy-regex",
+ "libc",
  "memmap2",
  "miyu-config",
  "miyu-recall",

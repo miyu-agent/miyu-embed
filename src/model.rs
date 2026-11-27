@@ -185,6 +185,8 @@ impl Embedder {
             (tokenizer, session)
         });
         let (tokenizer, (session, inputs, mapping)) = (tokenizer?, session?);
+        // 解析模型、建会话时用过又放掉的那些，在堆中间留下空着的页：还给系统（EM-5，`trim.rs`）。
+        crate::trim::release_free_pages();
         Ok(Embedder {
             session,
             tokenizer,
