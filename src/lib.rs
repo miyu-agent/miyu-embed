@@ -6,3 +6,4 @@ pub mod bpe;
 pub mod manifest;
 pub mod model;
 pub mod serve;
+mod words;
