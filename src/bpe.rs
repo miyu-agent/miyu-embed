@@ -9,11 +9,12 @@
 //! - 正则里 Unicode 的类别照 `regex` 的表，它照 Oniguruma 的：新分配的字可能切得不一样。
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::fmt;
-use std::hash::{BuildHasherDefault, Hasher};
 
 use fancy_regex::Regex;
+
+use crate::words::{Merges, Vocab};
 
 /// 切段的正则：GPT-4o（o200k）那一条，只少了 `\s+(?!\S)` 这一支（`tools/bpe_files.py` 的 `SPLIT` 有，给 `tokenizers` 对照用）。
 /// 这一支的意思是「连着的空白，后面还有字的话留最后一个给后面」：`fancy-regex` 的回溯栈为它每个空白存一格，一百万个就
@@ -24,56 +25,13 @@ pub const SPLIT: &str = concat!(
     r"|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+",
 );
 
-/// 查词表、合并用的哈希：FxHash 的做法（一次一个字长，乘一个常数）。载入时要查六十来万次，标准库的 SipHash 慢一倍多；
-/// 键是模型自己的词表和切出来的一段字，碰撞攻击无从谈起。
-#[derive(Debug, Clone, Copy, Default)]
-struct Fx(u64);
-
-impl Hasher for Fx {
-    fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            let mut word = [0; 8];
-            word.copy_from_slice(chunk);
-            self.add(u64::from_le_bytes(word));
-        }
-        for byte in chunks.remainder() {
-            self.add(u64::from(*byte));
-        }
-    }
-
-    fn write_u32(&mut self, n: u32) {
-        self.add(u64::from(n));
-    }
-
-    fn write_u8(&mut self, n: u8) {
-        self.add(u64::from(n));
-    }
-
-    fn write_usize(&mut self, n: usize) {
-        self.add(n as u64);
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-impl Fx {
-    fn add(&mut self, word: u64) {
-        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-    }
-}
-
-type Map<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
-
 /// 一份词表和合并照字节级 BPE 切。
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
     /// 词和它的编号（行号）。
-    vocab: Map<Box<str>, u32>,
+    vocab: Vocab,
     /// 相邻的两个编号能合成哪一个：（先后，合成的编号）。
-    merges: Map<(u32, u32), (u32, u32)>,
+    merges: Merges,
     /// 每个字节换成的字（GPT-2 的表）。
     chars: [char; 256],
     /// 每个字节那个字的编号；词表里没有的（granite 没有大部分控制字符、`0xF1` 以后的几个）丢掉，照 `tokenizers`（没有
@@ -108,6 +66,8 @@ pub enum FilesError {
     },
     /// 合并的第几行和前面的哪一行是同一对。
     Twice(usize),
+    /// 词表或者合并的行数、字节数放不进 32 位的编号。
+    TooMany,
 }
 
 impl fmt::Display for FilesError {
@@ -120,6 +80,7 @@ impl fmt::Display for FilesError {
                 write!(f, "merges line {line}: {word} is not in vocab")
             }
             FilesError::Twice(line) => write!(f, "merges line {line} repeats an earlier pair"),
+            FilesError::TooMany => write!(f, "vocab or merges has too many lines"),
         }
     }
 }
@@ -168,20 +129,14 @@ impl Tokenizer {
     ///
     /// # Errors
     ///
-    /// 一个词写了两行；没有 `start`、`end`；合并的一行不是两个词、有词不在词表里、一对写了两行。
+    /// 一个词写了两行；没有 `start`、`end`；合并的一行不是两个词、有词不在词表里、一对写了两行；行数、字节数放不进 32 位的编号。
     ///
     /// # Panics
     ///
     /// 不会：[`SPLIT`] 是写死的、合写法的正则（每个测试造一份就编一次）。
     pub fn new(vocab: &str, merges: &str, start: &str, end: &str) -> Result<Tokenizer, FilesError> {
-        let mut words = Map::default();
-        words.reserve(vocab.lines().count());
-        for (id, word) in (0_u32..).zip(vocab.lines()) {
-            if words.insert(Box::<str>::from(word), id).is_some() {
-                return Err(FilesError::Repeated(word.to_string()));
-            }
-        }
-        let find = |word: &str| words.get(word).copied();
+        let words = Vocab::new(vocab)?;
+        let find = |word: &str| words.get(word);
         let special = |word: &str| find(word).ok_or_else(|| FilesError::Missing(word.to_string()));
         let (start, end) = (special(start)?, special(end)?);
         let chars = byte_chars();
@@ -189,10 +144,10 @@ impl Tokenizer {
         for (c, slot) in chars.iter().zip(bytes.iter_mut()) {
             *slot = find(c.encode_utf8(&mut [0; 4]));
         }
-        let mut pairs = Map::default();
-        pairs.reserve(merges.lines().count());
+        let count = merges.lines().count();
+        let mut pairs = Merges::builder(count).ok_or(FilesError::TooMany)?;
         let mut joined = String::new();
-        for (rank, (at, line)) in (0_u32..).zip(merges.lines().enumerate()) {
+        for (at, line) in merges.lines().enumerate() {
             let line_no = at + 1;
             let (left, right) = line.split_once(' ').ok_or(FilesError::NotAPair(line_no))?;
             joined.clear();
@@ -204,18 +159,12 @@ impl Tokenizer {
                     word: word.to_string(),
                 })
             };
-            let pair = (known(left)?, known(right)?);
-            if pairs.insert(pair, (rank, known(&joined)?)).is_some() {
+            if !pairs.push(known(left)?, known(right)?, known(&joined)?) {
                 return Err(FilesError::Twice(line_no));
             }
         }
-        let longest = words
-            .keys()
-            .map(|word| word.chars().count())
-            .max()
-            .unwrap_or(1);
-        words.shrink_to_fit();
-        pairs.shrink_to_fit();
+        let pairs = pairs.finish();
+        let longest = words.longest();
         Ok(Tokenizer {
             vocab: words,
             merges: pairs,
@@ -296,7 +245,7 @@ impl Tokenizer {
             .map(|byte| self.chars[usize::from(byte)])
             .collect();
         if let Some(id) = self.vocab.get(whole.as_str()) {
-            ids.push(*id);
+            ids.push(id);
             return;
         }
         let known: Vec<u32> = piece
@@ -330,8 +279,8 @@ impl Tokenizer {
             .windows(2)
             .enumerate()
             .filter_map(|(at, pair)| {
-                let (rank, to) = self.merges.get(&(pair[0].id, pair[1].id))?;
-                Some(Reverse((*rank, at, *to)))
+                let (rank, to) = self.merges.get(pair[0].id, pair[1].id)?;
+                Some(Reverse((rank, at, to)))
             })
             .collect();
         while let Some(Reverse((_, at, to))) = queue.pop() {
@@ -341,7 +290,7 @@ impl Tokenizer {
                 continue;
             }
             let right = symbols[right_at];
-            if self.merges.get(&(left.id, right.id)).map(|(_, id)| *id) != Some(to) {
+            if self.merges.get(left.id, right.id).map(|(_, id)| id) != Some(to) {
                 continue;
             }
             symbols[at].id = to;
@@ -352,14 +301,14 @@ impl Tokenizer {
             }
             let current = symbols[at];
             if let Some(before) = current.prev
-                && let Some((rank, id)) = self.merges.get(&(symbols[before].id, current.id))
+                && let Some((rank, id)) = self.merges.get(symbols[before].id, current.id)
             {
-                queue.push(Reverse((*rank, before, *id)));
+                queue.push(Reverse((rank, before, id)));
             }
             if let Some(after) = current.next
-                && let Some((rank, id)) = self.merges.get(&(current.id, symbols[after].id))
+                && let Some((rank, id)) = self.merges.get(current.id, symbols[after].id)
             {
-                queue.push(Reverse((*rank, at, *id)));
+                queue.push(Reverse((rank, at, id)));
             }
         }
     }
